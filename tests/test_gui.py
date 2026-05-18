@@ -23,6 +23,9 @@ def test_parse_limit() -> None:
     assert module.parse_workers("") is None
     assert module.parse_workers("auto") is None
     assert module.parse_workers("4") == 4
+    assert module.parse_uvr_batch_size("") is None
+    assert module.parse_uvr_batch_size("auto") is None
+    assert module.parse_uvr_batch_size("8") == 8
 
 
 def test_format_progress_includes_eta_and_current_file() -> None:

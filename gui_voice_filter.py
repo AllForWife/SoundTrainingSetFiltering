@@ -25,7 +25,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from voice_filter_pipeline.pipeline import Pipeline, resolve_worker_count
+from voice_filter_pipeline.pipeline import Pipeline, resolve_uvr_batch_size, resolve_worker_count
 
 
 STAGE_LABELS = {
@@ -76,6 +76,16 @@ def parse_workers(value: str) -> int | None:
     return parsed
 
 
+def parse_uvr_batch_size(value: str) -> int | None:
+    value = value.strip()
+    if not value or value.lower() == "auto":
+        return None
+    parsed = int(value)
+    if parsed <= 0:
+        raise ValueError("UVR 批次大小必須是正整數，或輸入 auto")
+    return parsed
+
+
 def format_duration(seconds: float | None) -> str:
     if seconds is None:
         return "估算中"
@@ -121,6 +131,7 @@ class VoiceFilterGui:
         self.uvr_folder = StringVar(value=str(ROOT / "out" / "female_raw_pass"))
         self.limit = StringVar(value="100")
         self.workers = StringVar(value="auto")
+        self.uvr_batch_size = StringVar(value="16")
         self.process_all = BooleanVar(value=False)
         self.randomize = BooleanVar(value=True)
         self.stage = StringVar(value=STAGE_BY_VALUE["filter-only"])
@@ -165,6 +176,8 @@ class VoiceFilterGui:
         ttk.Checkbutton(controls, text="隨機抽樣", variable=self.randomize).grid(row=0, column=5, sticky="w", padx=(8, 0))
         ttk.Label(controls, text="平行 workers").grid(row=1, column=2, sticky="w")
         ttk.Entry(controls, textvariable=self.workers, width=10).grid(row=1, column=3, sticky="w", padx=6)
+        ttk.Label(controls, text="UVR 批次大小").grid(row=1, column=4, sticky="w")
+        ttk.Entry(controls, textvariable=self.uvr_batch_size, width=10).grid(row=1, column=5, sticky="w", padx=6)
         ttk.Label(controls, text="UVR 後端").grid(row=1, column=0, sticky="w")
         ttk.Combobox(
             controls,
@@ -247,14 +260,22 @@ class VoiceFilterGui:
             input_folder = Path(self.input_folder.get()).resolve()
             uvr_folder = Path(self.uvr_folder.get()).resolve()
             workers = parse_workers(self.workers.get())
+            uvr_batch_size = parse_uvr_batch_size(self.uvr_batch_size.get())
             os.environ["VOICE_FILTER_UVR_PYTHON"] = self.uvr_python.get()
             os.environ["VOICE_FILTER_UVR_MODEL"] = self.uvr_model.get()
-            pipeline = Pipeline(root=root, clips_dir=input_folder, progress_callback=self.log_progress, max_workers=workers)
+            pipeline = Pipeline(
+                root=root,
+                clips_dir=input_folder,
+                progress_callback=self.log_progress,
+                max_workers=workers,
+                uvr_batch_size=uvr_batch_size,
+            )
             stage = STAGE_LABELS.get(self.stage.get(), self.stage.get())
             kwargs = {"limit": limit, "randomize": self.randomize.get()}
             self.log(f"開始執行：{STAGE_BY_VALUE.get(stage, stage)}，輸出位置：{root}")
             self.log("處理範圍：整個資料夾" if limit is None else f"處理範圍：{limit} 筆")
             self.log(f"平行 workers：{pipeline.max_workers}（UVR 本身仍以單工作避免 GPU 記憶體互搶）")
+            self.log(f"UVR 批次大小：{pipeline.uvr_batch_size}（一次啟動 backend 處理多個檔案，避免重複載入模型）")
             self.log("進度保存：每 500 筆自動保存一次，可中斷後續跑；已存在於 out 的輸出會自動跳過。")
             self.log(f"篩選來源資料夾：{input_folder}")
             self.log(f"UVR 來源資料夾：{uvr_folder}")
@@ -316,7 +337,9 @@ def main(argv: list[str] | None = None) -> int:
         parse_limit("")
         resolve_limit("10", True)
         parse_workers("auto")
+        parse_uvr_batch_size("16")
         resolve_worker_count(None)
+        resolve_uvr_batch_size(None)
         return 0
     parser = argparse.ArgumentParser()
     parser.add_argument("--smoke", action="store_true", help="Import-only smoke test.")
@@ -326,7 +349,9 @@ def main(argv: list[str] | None = None) -> int:
         parse_limit("")
         resolve_limit("10", True)
         parse_workers("auto")
+        parse_uvr_batch_size("16")
         resolve_worker_count(None)
+        resolve_uvr_batch_size(None)
         return 0
     root = Tk()
     VoiceFilterGui(root)

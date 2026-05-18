@@ -4,7 +4,7 @@ from pathlib import Path
 import shutil
 import uuid
 
-from voice_filter_pipeline.pipeline import Pipeline, resolve_worker_count
+from voice_filter_pipeline.pipeline import Pipeline, resolve_uvr_batch_size, resolve_worker_count
 
 
 def test_default_checkpoint_interval_is_500() -> None:
@@ -20,6 +20,14 @@ def test_worker_count_is_bounded_and_overridable() -> None:
     assert resolve_worker_count(3) == 3
     assert resolve_worker_count(0) == 1
     assert 1 <= resolve_worker_count(None) <= 8
+
+
+def test_uvr_batch_size_default_and_override(monkeypatch) -> None:
+    monkeypatch.delenv("VOICE_FILTER_UVR_BATCH_SIZE", raising=False)
+    assert resolve_uvr_batch_size(None) == 16
+    assert resolve_uvr_batch_size(4) == 4
+    monkeypatch.setenv("VOICE_FILTER_UVR_BATCH_SIZE", "8")
+    assert resolve_uvr_batch_size(None) == 8
 
 
 def test_checkpoint_interval_uses_every_n_records() -> None:

@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from collections import Counter
 import os
 from pathlib import Path
+import shutil
 import time
 from typing import Any, Callable
 
@@ -12,7 +13,7 @@ from .config import Paths, Thresholds
 from .features import classify_gender, extract_features, quality_score
 from .fs import find_audio_files, output_name, safe_copy, select_files, sha1_file
 from .manifest import default_row, load_manifest, write_manifest
-from .separation import separate_vocal
+from .separation import separate_vocals_batch
 
 
 class Pipeline:
@@ -26,6 +27,7 @@ class Pipeline:
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
         progress_interval: int = 100,
         max_workers: int | None = None,
+        uvr_batch_size: int | None = None,
     ) -> None:
         self.paths = Paths.from_root(root, clips_dir)
         self.thresholds = thresholds or Thresholds()
@@ -34,6 +36,7 @@ class Pipeline:
         self.progress_callback = progress_callback
         self.progress_interval = max(1, progress_interval)
         self.max_workers = resolve_worker_count(max_workers)
+        self.uvr_batch_size = resolve_uvr_batch_size(uvr_batch_size)
 
     def scan(self, limit: int | None = None, seed: int = 7, randomize: bool = False) -> dict[str, Any]:
         rows = load_manifest(self.paths.manifest)
@@ -127,41 +130,56 @@ class Pipeline:
         )
         started_at = time.monotonic()
         self._emit_progress("separate", 0, len(selected), started_at, force=True)
-        for processed, row in enumerate(selected, start=1):
-            src = Path(row.get("female_raw_path") or self._ensure_wav(row))
+        jobs: list[tuple[dict[str, Any], Path, Path]] = []
+        processed = 0
+        for row in selected:
+            src = Path(row.get("female_raw_path") or self._ensure_wav(row)).resolve()
             dst = self.paths.work / "uvr" / output_name(row, ".wav")
             if dst.exists():
                 row["uvr_output_path"] = str(dst)
                 row["final_status"] = "uvr_done"
                 row["reject_reason"] = None
-                if self._should_checkpoint(processed):
-                    write_manifest(self.paths.manifest, rows)
-                    self._emit_progress("separate", processed, len(selected), started_at, src, checkpoint=True)
-                else:
-                    self._emit_progress("separate", processed, len(selected), started_at, src)
+                processed += 1
+                rows[str(Path(str(row["source_path"])).resolve())] = row
+                self._emit_checkpoint_or_progress("separate", processed, len(selected), started_at, src, rows)
                 continue
+            jobs.append((row, src, dst))
+        for batch_index, batch in enumerate(_chunks(jobs, self.uvr_batch_size), start=1):
+            batch_sources = [src for _, src, _ in batch]
             try:
-                ok, selected_backend, error = separate_vocal(src, dst, backend)
-                row["uvr_backend"] = selected_backend
-                if ok:
-                    row["uvr_output_path"] = str(dst)
-                    row["final_status"] = "uvr_done"
-                    row["reject_reason"] = None
-                else:
-                    row["uvr_output_path"] = None
-                    row["final_status"] = "uvr_failed"
-                    row["reject_reason"] = error or "uvr_failed"
+                tmp_dir = self.paths.work / "uvr_batch_tmp" / f"separate_{batch_index:06d}"
+                separated, selected_backend, errors = separate_vocals_batch(batch_sources, tmp_dir, backend)
+                for row, src, dst in batch:
+                    row["uvr_backend"] = selected_backend
+                    output = separated.get(src)
+                    if output is not None:
+                        decode_to_wav(output, dst)
+                        row["uvr_output_path"] = str(dst)
+                        row["final_status"] = "uvr_done"
+                        row["reject_reason"] = None
+                    else:
+                        row["uvr_output_path"] = None
+                        row["final_status"] = "uvr_failed"
+                        row["reject_reason"] = errors.get(src, "uvr_output_missing")
+                    processed += 1
+                    rows[str(Path(str(row["source_path"])).resolve())] = row
+                    self._emit_checkpoint_or_progress("separate", processed, len(selected), started_at, src, rows)
+                shutil.rmtree(tmp_dir, ignore_errors=True)
             except Exception as exc:
-                row["final_status"] = "uvr_failed"
-                row["reject_reason"] = f"uvr_failed:{exc}"
-            if self._should_checkpoint(processed):
-                write_manifest(self.paths.manifest, rows)
-                self._emit_progress("separate", processed, len(selected), started_at, src, checkpoint=True)
-            else:
-                self._emit_progress("separate", processed, len(selected), started_at, src)
+                for row, src, _ in batch:
+                    row["final_status"] = "uvr_failed"
+                    row["reject_reason"] = f"uvr_failed:{exc}"
+                    processed += 1
+                    rows[str(Path(str(row["source_path"])).resolve())] = row
+                    self._emit_checkpoint_or_progress("separate", processed, len(selected), started_at, src, rows)
         write_manifest(self.paths.manifest, rows)
         self._emit_progress("separate", len(selected), len(selected), started_at, done=True, force=True)
-        return {"processed": len(selected), "checkpoint_interval": self.checkpoint_interval, "workers": 1}
+        return {
+            "processed": len(selected),
+            "checkpoint_interval": self.checkpoint_interval,
+            "workers": 1,
+            "uvr_batch_size": self.uvr_batch_size,
+        }
 
     def verify(self, limit: int | None = None, seed: int = 7, randomize: bool = False) -> dict[str, Any]:
         rows = load_manifest(self.paths.manifest)
@@ -223,6 +241,7 @@ class Pipeline:
         skipped = 0
         started_at = time.monotonic()
         self._emit_progress("manual_uvr", 0, len(files), started_at, force=True)
+        jobs: list[tuple[Path, dict[str, Any], Path]] = []
         for src in files:
             src = src.resolve()
             row = rows.get(str(src), default_row(src))
@@ -230,50 +249,52 @@ class Pipeline:
             if self._apply_existing_manual_uvr_output(row):
                 skipped += 1
                 processed += 1
-                if self._should_checkpoint(processed):
-                    write_manifest(self.paths.manifest, rows)
-                    self._emit_progress("manual_uvr", processed, len(files), started_at, src, checkpoint=True)
-                else:
-                    self._emit_progress("manual_uvr", processed, len(files), started_at, src)
+                rows[str(src)] = row
+                self._emit_checkpoint_or_progress("manual_uvr", processed, len(files), started_at, src, rows)
                 continue
             row["decode_ok"] = True
             row["manual_uvr_source_path"] = str(src)
-            dst = self.paths.work / "uvr_manual" / output_name(row, ".wav")
+            jobs.append((src, row, self.paths.work / "uvr_manual" / output_name(row, ".wav")))
+        for batch_index, batch in enumerate(_chunks(jobs, self.uvr_batch_size), start=1):
+            sources = [src for src, _, _ in batch]
             try:
-                ok, selected_backend, error = separate_vocal(src, dst, backend)
-                row["uvr_backend"] = selected_backend
-                if not ok:
-                    failed += 1
-                    row["uvr_output_path"] = None
-                    row["final_status"] = "manual_uvr_failed"
-                    row["reject_reason"] = error or "uvr_failed"
+                tmp_dir = self.paths.work / "uvr_batch_tmp" / f"manual_{batch_index:06d}"
+                separated, selected_backend, errors = separate_vocals_batch(sources, tmp_dir, backend)
+                for src, row, dst in batch:
+                    row["uvr_backend"] = selected_backend
+                    output = separated.get(src)
+                    if output is None:
+                        failed += 1
+                        row["uvr_output_path"] = None
+                        row["final_status"] = "manual_uvr_failed"
+                        row["reject_reason"] = errors.get(src, "uvr_output_missing")
+                    else:
+                        row["uvr_output_path"] = str(dst)
+                        decode_to_wav(output, dst)
+                        wav, sr = read_audio(dst)
+                        features = extract_features(wav, sr)
+                        score, reasons = quality_score(features, self.thresholds)
+                        row["post_uvr_score"] = score
+                        row["post_uvr_reasons"] = reasons
+                        row["post_uvr_feature_summary"] = _feature_summary(features)
+                        clean_path = self.paths.out / "uvr_cleaned_selected" / output_name(row, ".wav")
+                        write_wav(clean_path, wav, sr)
+                        row["final_output_path"] = str(clean_path)
+                        row["final_status"] = "manual_uvr_cleaned"
+                        row["reject_reason"] = None if score >= self.thresholds.post_uvr_review else "manual_uvr_low_score"
+                        accepted += 1
+                    processed += 1
                     rows[str(src)] = row
-                    continue
-                row["uvr_output_path"] = str(dst)
-                wav, sr = read_audio(dst)
-                features = extract_features(wav, sr)
-                score, reasons = quality_score(features, self.thresholds)
-                row["post_uvr_score"] = score
-                row["post_uvr_reasons"] = reasons
-                row["post_uvr_feature_summary"] = _feature_summary(features)
-                clean_path = self.paths.out / "uvr_cleaned_selected" / output_name(row, ".wav")
-                write_wav(clean_path, wav, sr)
-                row["final_output_path"] = str(clean_path)
-                row["final_status"] = "manual_uvr_cleaned"
-                row["reject_reason"] = None if score >= self.thresholds.post_uvr_review else "manual_uvr_low_score"
-                accepted += 1
+                    self._emit_checkpoint_or_progress("manual_uvr", processed, len(files), started_at, src, rows)
+                shutil.rmtree(tmp_dir, ignore_errors=True)
             except Exception as exc:
-                failed += 1
-                row["final_status"] = "manual_uvr_failed"
-                row["reject_reason"] = f"uvr_failed:{exc}"
-            finally:
-                processed += 1
-                rows[str(src)] = row
-                if self._should_checkpoint(processed):
-                    write_manifest(self.paths.manifest, rows)
-                    self._emit_progress("manual_uvr", processed, len(files), started_at, src, checkpoint=True)
-                else:
-                    self._emit_progress("manual_uvr", processed, len(files), started_at, src)
+                for src, row, _ in batch:
+                    failed += 1
+                    row["final_status"] = "manual_uvr_failed"
+                    row["reject_reason"] = f"uvr_failed:{exc}"
+                    processed += 1
+                    rows[str(src)] = row
+                    self._emit_checkpoint_or_progress("manual_uvr", processed, len(files), started_at, src, rows)
         write_manifest(self.paths.manifest, rows)
         self._emit_progress("manual_uvr", len(files), len(files), started_at, done=True, force=True)
         report_path = self.write_report(rows)
@@ -283,6 +304,7 @@ class Pipeline:
             "failed": failed,
             "skipped": skipped,
             "checkpoint_interval": self.checkpoint_interval,
+            "uvr_batch_size": self.uvr_batch_size,
             "report": str(report_path),
         }
 
@@ -456,6 +478,21 @@ class Pipeline:
     def _should_checkpoint(self, processed: int) -> bool:
         return processed > 0 and processed % self.checkpoint_interval == 0
 
+    def _emit_checkpoint_or_progress(
+        self,
+        stage: str,
+        processed: int,
+        total: int,
+        started_at: float,
+        current_path: Path,
+        rows: dict[str, dict[str, Any]],
+    ) -> None:
+        if self._should_checkpoint(processed):
+            write_manifest(self.paths.manifest, rows)
+            self._emit_progress(stage, processed, total, started_at, current_path, checkpoint=True)
+        else:
+            self._emit_progress(stage, processed, total, started_at, current_path)
+
     def _apply_existing_classify_output(self, row: dict[str, Any]) -> bool:
         if self._source_copy_exists(row, "rejected", "no_voice"):
             row["final_status"] = "rejected"
@@ -584,3 +621,20 @@ def resolve_worker_count(max_workers: int | None = None) -> int:
         return max(1, int(max_workers))
     cpu_count = os.cpu_count() or 4
     return max(1, min(8, cpu_count))
+
+
+def resolve_uvr_batch_size(uvr_batch_size: int | None = None) -> int:
+    if uvr_batch_size is not None:
+        return max(1, int(uvr_batch_size))
+    raw = os.environ.get("VOICE_FILTER_UVR_BATCH_SIZE")
+    if raw:
+        try:
+            return max(1, int(raw))
+        except ValueError:
+            return 16
+    return 16
+
+
+def _chunks(items: list[Any], size: int):
+    for index in range(0, len(items), size):
+        yield items[index : index + size]

@@ -15,6 +15,7 @@ def build_parser() -> argparse.ArgumentParser:
     common.add_argument("--seed", type=int, default=7, help="Random seed for pilot sampling.")
     common.add_argument("--random", action="store_true", help="Randomly sample when --limit is used.")
     common.add_argument("--workers", type=int, default=None, help="Parallel workers for non-UVR stages. Default: auto.")
+    common.add_argument("--uvr-batch-size", type=int, default=None, help="Files per UVR backend invocation. Default: 16.")
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("scan", "classify", "score", "verify", "filter-only"):
         sub.add_parser(name, parents=[common])
@@ -33,7 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    pipeline = Pipeline(args.root, max_workers=args.workers)
+    pipeline = Pipeline(args.root, max_workers=args.workers, uvr_batch_size=args.uvr_batch_size)
     common = {"limit": args.limit, "seed": args.seed, "randomize": args.random}
     if args.command == "scan":
         result = pipeline.scan(**common)

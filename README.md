@@ -24,6 +24,18 @@ python .\voice_filter.py filter-only --workers 8
 UVR remains controlled separately because running many UVR model jobs at once
 can exhaust GPU memory.
 
+UVR folder cleaning batches files through one backend invocation at a time so
+the model is not reloaded for every single clip. Tune batch size with
+`--uvr-batch-size`:
+
+```powershell
+python .\voice_filter.py uvr-folder .\out\female_raw_pass --backend audio-separator --uvr-batch-size 16
+```
+
+The UVR preflight checks available NVIDIA memory before launching. By default
+it requires 6000 MB free; close other GPU-heavy processes or set
+`VOICE_FILTER_UVR_MIN_FREE_MB=0` to disable that guard.
+
 Outputs are written under `work/` and `out/`. The source `clips/` folder is
 never modified.
 
