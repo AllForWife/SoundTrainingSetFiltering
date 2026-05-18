@@ -1,0 +1,25 @@
+# Runtime data and generated outputs
+clips/
+work/
+out/
+dist/
+build/
+篩選/
+
+# Local virtual environments
+.venv/
+.venv-uvr/
+venv/
+
+# Python caches and test caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local orchestration state
+.omx/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+*.tmp

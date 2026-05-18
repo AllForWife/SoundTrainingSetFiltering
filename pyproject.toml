@@ -1,0 +1,13 @@
+[project]
+name = "voice-filter-pipeline"
+version = "0.1.0"
+description = "Content-only female voice filtering and UVR cleaning pipeline."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+voice-filter = "voice_filter_pipeline.cli:main"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
