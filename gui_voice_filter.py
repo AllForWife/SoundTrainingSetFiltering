@@ -134,6 +134,8 @@ class VoiceFilterGui:
         self.uvr_batch_size = StringVar(value="16")
         self.process_all = BooleanVar(value=False)
         self.randomize = BooleanVar(value=True)
+        self.notify_on_finish = BooleanVar(value=False)
+        self.status = StringVar(value="待命")
         self.stage = StringVar(value=STAGE_BY_VALUE["filter-only"])
         self.backend = StringVar(value="audio-separator")
         self.uvr_python = StringVar(value=str(ROOT / ".venv-uvr" / "Scripts" / "python.exe"))
@@ -193,6 +195,12 @@ class VoiceFilterGui:
         ttk.Entry(controls, textvariable=self.uvr_model).grid(row=3, column=1, columnspan=3, sticky="ew", padx=6)
         controls.columnconfigure(3, weight=1)
 
+        status_row = ttk.Frame(outer)
+        status_row.pack(fill="x", pady=(8, 0))
+        ttk.Label(status_row, text="狀態").pack(side="left")
+        ttk.Label(status_row, textvariable=self.status).pack(side="left", padx=(6, 16))
+        ttk.Checkbutton(status_row, text="完成後跳提示", variable=self.notify_on_finish).pack(side="left")
+
         hint = ttk.Label(
             outer,
             text="建議流程：先用「只做篩選」處理 clips，確認 out/female_raw_pass 後，再選該資料夾執行「對資料夾做 UVR」。",
@@ -243,9 +251,11 @@ class VoiceFilterGui:
 
     def start(self) -> None:
         if self.worker and self.worker.is_alive():
-            messagebox.showinfo("正在執行", "目前已有任務正在執行。")
+            self.set_status("已有任務正在背景執行")
+            self.log("目前已有任務正在執行，未啟動新任務。")
             return
         self.cancel_requested = False
+        self.set_status("背景執行中")
         self.worker = threading.Thread(target=self._run_worker, daemon=True)
         self.worker.start()
 
@@ -281,11 +291,15 @@ class VoiceFilterGui:
             self.log(f"UVR 來源資料夾：{uvr_folder}")
             result = self._run_stage(pipeline, stage, kwargs, uvr_folder)
             self.log(f"完成：{result}")
+            self.root.after(0, lambda: self.set_status("完成"))
             self.root.after(0, self.refresh_report)
-            self.root.after(0, lambda: messagebox.showinfo("處理完成", f"任務已完成。\n\n結果：{result}"))
+            if self.notify_on_finish.get():
+                self.root.after(0, lambda: messagebox.showinfo("處理完成", f"任務已完成。\n\n結果：{result}"))
         except Exception as exc:
             self.log(f"錯誤：{exc}")
-            self.root.after(0, lambda exc=exc: messagebox.showerror("聲音訓練集過濾工具", str(exc)))
+            self.root.after(0, lambda: self.set_status("錯誤，請查看執行紀錄"))
+            if self.notify_on_finish.get():
+                self.root.after(0, lambda exc=exc: messagebox.showerror("聲音訓練集過濾工具", str(exc)))
 
     def _run_stage(self, pipeline: Pipeline, stage: str, kwargs: dict, uvr_folder: Path):
         if stage == "scan":
@@ -305,8 +319,13 @@ class VoiceFilterGui:
     def log(self, message: str) -> None:
         self.log_queue.put(message)
 
+    def set_status(self, message: str) -> None:
+        self.status.set(message)
+
     def log_progress(self, progress: dict) -> None:
-        self.log(format_progress(progress))
+        text = format_progress(progress)
+        self.log(text)
+        self.root.after(0, lambda: self.set_status(text))
 
     def _poll_logs(self) -> None:
         while True:
