@@ -10,6 +10,17 @@ from typing import Any
 import numpy as np
 
 
+def hidden_subprocess_kwargs() -> dict[str, Any]:
+    if not hasattr(subprocess, "CREATE_NO_WINDOW"):
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    return {
+        "creationflags": subprocess.CREATE_NO_WINDOW,
+        "startupinfo": startupinfo,
+    }
+
+
 def require_tool(name: str) -> str:
     found = shutil.which(name)
     if not found:
@@ -29,7 +40,14 @@ def ffprobe(path: Path) -> dict[str, Any]:
         "json",
         str(path),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        **hidden_subprocess_kwargs(),
+    )
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or f"ffprobe failed: {path}")
     data = json.loads(proc.stdout)
@@ -66,7 +84,14 @@ def decode_to_wav(src: Path, dst: Path, sample_rate: int = 24000) -> None:
         "s16",
         str(dst),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        **hidden_subprocess_kwargs(),
+    )
     if proc.returncode != 0:
         raise RuntimeError(proc.stderr.strip() or f"ffmpeg decode failed: {src}")
 

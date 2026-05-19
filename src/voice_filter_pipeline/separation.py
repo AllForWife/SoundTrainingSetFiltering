@@ -6,7 +6,7 @@ import subprocess
 import os
 from pathlib import Path
 
-from .audio import decode_to_wav
+from .audio import decode_to_wav, hidden_subprocess_kwargs
 
 
 def detect_backend(preferred: str = "auto") -> str | None:
@@ -223,6 +223,7 @@ def _run_backend(cmd: list[str]) -> subprocess.CompletedProcess[str]:
             encoding="utf-8",
             errors="replace",
             timeout=timeout,
+            **hidden_subprocess_kwargs(),
         )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(f"uvr_timeout_after_{timeout}s") from exc
@@ -246,6 +247,7 @@ def _ensure_gpu_memory_available() -> None:
         encoding="utf-8",
         errors="replace",
         timeout=10,
+        **hidden_subprocess_kwargs(),
     )
     if proc.returncode != 0:
         return
